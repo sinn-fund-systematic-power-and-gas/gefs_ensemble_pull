@@ -1,0 +1,10 @@
+# GEFS ensemble historical pull — install in a venv: pip install -r requirements.txt
+# Python 3.10+ recommended. If you see numpy/bottleneck errors, use numpy<2.3.
+
+herbie-data>=0.4.0
+pandas>=1.5
+xarray>=2023.1
+pyarrow>=10.0
+cfgrib>=0.9.10
+numpy>=1.22,<2.3
+
