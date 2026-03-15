@@ -1,7 +1,7 @@
 .venv/
-output/
 .herbie_cache/
 __pycache__/
 *.parquet
+!output/**/*.parquet
 .DS_Store
 
