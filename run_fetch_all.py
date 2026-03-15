@@ -1,6 +1,10 @@
 """
-Fetch GEFS ensemble-mean 2m temperature: 16 days (0–384h), 3h steps 0–240h / 6h steps 240–384h, all 10 cities.
-Saves one parquet per run to output/gefs_temps_YYYYMMDD_HHz.parquet.
+Fetch GEFS 2m temperature: 16 days (0–384h), 3h steps 0–240h / 6h steps 240–384h, all 10 cities.
+
+New output layout:
+- Day folders under: output/YYYYMMDD/
+- One parquet per member per run hour:
+    gefs_temps_YYYYMMDD_HHz_member_{member}.parquet
 
 Run from this folder's parent:
   python -m gefs_ensemble_pull.run_fetch_all --start 2025-01-01 --end 2025-01-02
@@ -23,6 +27,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+import shutil
 
 # Make this folder the working directory and add it to path (works when folder is anywhere)
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -31,7 +36,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import pandas as pd
-from config import GEFS_RUN_HOURS, OUTPUT_DIR, FORECAST_HOURS
+from config import GEFS_RUN_HOURS, OUTPUT_DIR, FORECAST_HOURS, HERBIE_SAVE_DIR, GEFS_MEMBERS
 from fetch_full_run import fetch_full_run
 from gefs_utils import get_latest_gefs_run, get_previous_gefs_run
 
@@ -61,6 +66,35 @@ def get_latest_run_times(n: int):
         label = run_time.strftime("%Y%m%d_%H")
         yield run_time, label
         run_time = get_previous_gefs_run(run_time)
+
+
+def run_already_complete(run_time: datetime, label: str) -> bool:
+    """True if all 32 member parquets exist for this run."""
+    day_dir = Path(OUTPUT_DIR) / run_time.strftime("%Y%m%d")
+    if not day_dir.exists():
+        return False
+    for member in GEFS_MEMBERS:
+        member_str = str(member)
+        path = day_dir / f"gefs_temps_{label}z_member_{member_str}.parquet"
+        if not path.exists():
+            return False
+    return True
+
+
+def cleanup_herbie_cache_for_run(vintage: datetime) -> None:
+    """
+    Remove the Herbie cache directory for a single GEFS vintage date,
+    without touching cache for other dates. Herbie stores files under:
+      HERBIE_SAVE_DIR / "gefs" / YYYYMMDD
+    """
+    date_str = vintage.strftime("%Y%m%d")
+    cache_dir = Path(HERBIE_SAVE_DIR) / "gefs" / date_str
+    if cache_dir.exists():
+        try:
+            shutil.rmtree(cache_dir)
+            print(f"  Cleared Herbie cache for {date_str}: {cache_dir}")
+        except Exception as e:
+            print(f"  Warning: could not clear cache {cache_dir}: {e}")
 
 
 def main():
@@ -101,15 +135,13 @@ def main():
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Runs to fetch: {len(runs)}")
     for run_time, label in runs:
-        print(f"  {run_time.strftime('%Y-%m-%d %H:%M')} UTC -> gefs_temps_{label}z.parquet")
+        print(f"  {run_time.strftime('%Y-%m-%d %H:%M')} UTC -> day folder with member files")
     print()
 
     for run_time, label in runs:
-        out_path = Path(OUTPUT_DIR) / f"gefs_temps_{label}z.parquet"
-        if out_path.exists():
-            print(f"Skipping {label} (file exists): {out_path.name}")
+        if run_already_complete(run_time, label):
+            print(f"  Already have {label}, skipping.")
             continue
-
         print(f"Fetching {label}...")
 
         def progress(fxx, total):
@@ -126,9 +158,25 @@ def main():
             print(f"  No data for {label}, skipping.")
             continue
 
+        # Sort once, then split by member to write one file per member.
         df = df.sort_values(["city", "member", "forecast_hour"]).reset_index(drop=True)
-        df.to_parquet(out_path, index=False)
-        print(f"  Wrote {len(df)} rows -> {out_path.name}")
+
+        day_dir = Path(OUTPUT_DIR) / run_time.strftime("%Y%m%d")
+        day_dir.mkdir(parents=True, exist_ok=True)
+
+        written_files = 0
+        for member_value, member_df in df.groupby("member"):
+            member_str = str(member_value)
+            member_path = day_dir / f"gefs_temps_{label}z_member_{member_str}.parquet"
+            member_df.to_parquet(member_path, index=False)
+            written_files += 1
+
+        print(
+            f"  Wrote {len(df)} rows into {written_files} member files in {day_dir}"
+        )
+
+        # Free disk space by removing only the Herbie cache for this vintage date.
+        cleanup_herbie_cache_for_run(run_time)
 
     print("\nDone.")
 

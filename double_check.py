@@ -1,6 +1,15 @@
 """
-Check and fill gaps in output/ parquet files for GEFS pulls (all members + mean).
-Does not delete — merges missing forecast hours/members.
+Check and fill gaps in GEFS output parquet files for this project.
+
+New layout (matches run_fetch_all.py):
+- Parquets live under: OUTPUT_DIR / YYYYMMDD /
+- One file per member per run hour:
+    gefs_temps_YYYYMMDD_HHz_member_{member}.parquet
+
+This script:
+- Detects missing / incomplete runs across all members.
+- Refetches any gaps and writes/merges per-member files back into day folders.
+
 Run from this folder: python double_check.py --start YYYY-MM-DD --end YYYY-MM-DD
 """
 
@@ -16,7 +25,13 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import pandas as pd
-from config import CITIES, GEFS_RUN_HOURS, OUTPUT_DIR, FORECAST_HOURS_LIST, GEFS_MEMBERS
+from config import (
+    CITIES,
+    GEFS_RUN_HOURS,
+    OUTPUT_DIR,
+    FORECAST_HOURS_LIST,
+    GEFS_MEMBERS,
+)
 from fetch_full_run import fetch_full_run
 
 
@@ -36,31 +51,53 @@ def get_expected_runs(start: datetime, end: datetime):
         current += timedelta(days=1)
 
 
-def scan_existing_files(output_dir: Path):
-    existing = {}
-    for parquet_file in output_dir.glob("gefs_temps_*.parquet"):
-        try:
-            label = parquet_file.stem.replace("gefs_temps_", "").replace("z", "")
-            df = pd.read_parquet(parquet_file)
-            existing[label] = len(df)
-        except Exception as e:
-            print(f"Warning: Could not read {parquet_file.name}: {e}")
-    return existing
+def _member_file_path(day_dir: Path, label: str, member: str) -> Path:
+    """Return the expected path for a single member parquet for a given run label."""
+    return day_dir / f"gefs_temps_{label}z_member_{member}.parquet"
 
 
 def find_gaps(start: datetime, end: datetime, output_dir: Path):
-    existing = scan_existing_files(output_dir)
+    """
+    Scan OUTPUT_DIR for missing or incomplete runs in the new per-day/per-member layout.
+
+    A run is considered:
+    - missing: no member files exist for its day/hour.
+    - incomplete: some members or forecast hours are missing (total rows < expected).
+    """
     missing, incomplete = [], []
+
     for run_time, label, expected_rows in get_expected_runs(start, end):
-        if label not in existing:
+        day_dir = output_dir / run_time.strftime("%Y%m%d")
+        if not day_dir.exists():
             missing.append((run_time, label, expected_rows))
-        elif existing[label] < expected_rows:
-            incomplete.append((run_time, label, expected_rows, existing[label]))
+            continue
+
+        total_rows = 0
+        member_files_found = 0
+        for member in GEFS_MEMBERS:
+            member_str = str(member)
+            path = _member_file_path(day_dir, label, member_str)
+            if not path.exists():
+                continue
+            try:
+                df = pd.read_parquet(path)
+                member_files_found += 1
+                total_rows += len(df)
+            except Exception as e:
+                print(f"Warning: Could not read {path.name}: {e}")
+
+        if member_files_found == 0:
+            missing.append((run_time, label, expected_rows))
+        elif total_rows < expected_rows or member_files_found < len(GEFS_MEMBERS):
+            incomplete.append((run_time, label, expected_rows, total_rows))
+
     return missing, incomplete
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Check and fill gaps in GEFS output/ parquets")
+    parser = argparse.ArgumentParser(
+        description="Check and fill gaps in GEFS per-member/parquet output under output/YYYYMMDD/"
+    )
     g = parser.add_mutually_exclusive_group(required=True)
     g.add_argument("--start", type=str)
     g.add_argument("--months", type=str, nargs="+")
@@ -114,8 +151,10 @@ def main():
 
     print(f"\nFilling {len(to_fill)} runs...")
     for run_time, label, expected_rows in to_fill:
-        out_path = output_dir / f"gefs_temps_{label}z.parquet"
-        print(f"  Filling {label} -> {out_path.name}")
+        day_dir = output_dir / run_time.strftime("%Y%m%d")
+        day_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  Filling {label} -> day folder {day_dir}")
+
         try:
             df = fetch_full_run(run_time)
         except Exception as e:
@@ -126,19 +165,34 @@ def main():
             print(f"    No data for {label}, skipping.")
             continue
 
-        if out_path.exists():
-            try:
-                existing_df = pd.read_parquet(out_path)
-                df = pd.concat([existing_df, df], ignore_index=True)
-                df = df.drop_duplicates(
-                    subset=["vintage_time", "forecast_hour", "city", "member"], keep="last"
-                )
-            except Exception as e:
-                print(f"    Warning: Could not merge with existing {out_path.name}: {e}")
-
         df = df.sort_values(["city", "member", "forecast_hour"]).reset_index(drop=True)
-        df.to_parquet(out_path, index=False)
-        print(f"    Wrote {len(df)} rows -> {out_path.name}")
+
+        written_files = 0
+        total_rows_written = 0
+        for member_value, member_df in df.groupby("member"):
+            member_str = str(member_value)
+            out_path = _member_file_path(day_dir, label, member_str)
+
+            if out_path.exists():
+                try:
+                    existing_df = pd.read_parquet(out_path)
+                    member_df = pd.concat([existing_df, member_df], ignore_index=True)
+                    member_df = member_df.drop_duplicates(
+                        subset=["vintage_time", "forecast_hour", "city", "member"],
+                        keep="last",
+                    )
+                except Exception as e:
+                    print(
+                        f"    Warning: Could not merge with existing {out_path.name}: {e}"
+                    )
+
+            member_df.to_parquet(out_path, index=False)
+            written_files += 1
+            total_rows_written += len(member_df)
+
+        print(
+            f"    Wrote {total_rows_written} rows into {written_files} member files in {day_dir}"
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ## GEFS Ensemble Historical Pull (standalone)
 
-Pull **NOAA GEFS 2m temperature** for 16 days (0–384h) for **10 US cities**: **all 31 members** (control + perturbed 1–30) **plus the ensemble mean** (32 total). Time steps: **3-hour 0–240h**, **6-hour 246–384h**. One parquet per run (00z, 06z, 12z, 18z). No dependency on the parent project — **you can move this folder anywhere** and it will still work.
+Pull **NOAA GEFS 2m temperature** for 16 days (0–384h) for **10 US cities**: **all 31 members** (control + perturbed 1–30) **plus the ensemble mean** (32 total). Time steps: **3-hour 0–240h**, **6-hour 246–384h**. Output is organized per day and per member. No dependency on the parent project — **you can move this folder anywhere** and it will still work.
 
 ### Setup
 
@@ -15,10 +15,14 @@ If you get numpy/bottleneck errors, use: `pip install "numpy<2.3"`.
 
 ### Output
 
-- **Directory:** `output/` (created inside this folder)
-- **Files:** `gefs_temps_YYYYMMDD_HHz.parquet` (e.g. `gefs_temps_20260215_12z.parquet`)
-- **Schema:** `vintage_time`, `forecast_hour`, `valid_time`, `city`, `member`, `temp_k`, `temp_f` (`member` = `"mean"`, `"0"`..`"30"`)
-- **Rows per file:** 105 steps × 10 cities × 32 members = **33,600**
+- **Directory root:** `output/` (created inside this folder)
+- **Day folders:** `output/YYYYMMDD/` (e.g. `output/20260215/`)
+- **Files per run:** one parquet **per member** per run hour:
+  - `gefs_temps_YYYYMMDD_HHz_member_{member}.parquet`
+  - Example: `output/20260215/gefs_temps_20260215_12z_member_mean.parquet`
+  - Example: `output/20260215/gefs_temps_20260215_12z_member_0.parquet`
+- **Schema (each file):** `vintage_time`, `forecast_hour`, `valid_time`, `city`, `member`, `temp_k`, `temp_f` (`member` = `"mean"`, `"0"`..`"30"`)
+- **Rows per member file:** 105 steps × 10 cities = **1,050**
 
 For degree days / load modeling: use 3h data through day 10, then linearly interpolate or hold values for the 6h segment when computing daily metrics.
 
